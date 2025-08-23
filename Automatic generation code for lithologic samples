@@ -1,3 +1,6 @@
+//*****table1 shows the shap files within the study area range; table2 shows the standardized shap file, 
+which contains 14 lithologies. Two files were uploaded to GEE locally****************//
+
 var roi = table1;
 // print("roi",roi);
 Map.addLayer(roi,{'color':'blue'},'studyArea',false);
@@ -5,15 +8,6 @@ Map.centerObject(roi);
 var area_km2= roi.geometry().area().divide(1e6);
 // var area_km2 = ee.Geometry(roi).area({'maxError': 1}).divide(1e6);
 print('ROI面积（km²）:', area_km2);
-
-
-var dataset = ee.ImageCollection('ESA/WorldCover/v100').first();
-var dataset1 = dataset.clip(roi);
-
-var water_ESA = dataset1.eq(80);
-var urban_ESA = dataset1.eq(50);
-var foret_ESA = dataset1.eq(10);
-var keepMask = water_ESA.or(urban_ESA).or(foret_ESA).not();
 
 //***********************************************************************************Sentinel-2
 // remove cloud from Sentinel-2
@@ -132,15 +126,14 @@ var terrain = ee.Algorithms.Terrain(dataset);
 
 var bands1=["B2","B3","B4","B8","B11","B12"]
 //***********************************************************************************PCA
-// 定义一个函数，用于对矢量进行矩形分块
+// Define a function for rectangular blocking of a vector
 function shpRectBlock(vector, numHorizontal, numVertical) {  
-  // 检查输入是否为矢量  
+  // Check whether the input is a vector
   if (!(vector instanceof ee.Geometry || vector instanceof ee.Feature || vector instanceof ee.FeatureCollection)) {  
     throw new Error('Input must be a Geometry, Feature, or FeatureCollection.');  
   }  
 
-
-  // 如果是 FeatureCollection，提取其几何  
+  // If it is a FeatureCollection, extract its geometry
   if (vector instanceof ee.FeatureCollection) {  
     vector = vector.geometry();  
   } 
@@ -151,21 +144,19 @@ function shpRectBlock(vector, numHorizontal, numVertical) {  
     vector = vector;
   }
 
-  // 获取矢量的边界框  
+  // Obtain the bounding box of the vector
   var bounds = vector.bounds();  
-  var coords = ee.List(bounds.coordinates().get(0)); // 获取边界框的坐标  
+  var coords = ee.List(bounds.coordinates().get(0)); // Obtain the coordinates of the bounding box
   var xmin = ee.Number(ee.List(coords.get(0)).get(0));  
   var ymin = ee.Number(ee.List(coords.get(0)).get(1));  
   var xmax = ee.Number(ee.List(coords.get(2)).get(0));  
   var ymax = ee.Number(ee.List(coords.get(2)).get(1));  
 
-
-  // 计算每个矩形块的宽度和高度  
+  // Calculate the width and height of each rectangular block
   var xStep = xmax.subtract(xmin).divide(numHorizontal);  
   var yStep = ymax.subtract(ymin).divide(numVertical);  
 
-
-  // 创建矩形块  
+  // Create a rectangular block
   var rectangles = ee.List.sequence(0, numHorizontal - 1).map(function (i) {  
     return ee.List.sequence(0, numVertical - 1).map(function (j) {  
       var x0 = xmin.add(xStep.multiply(i));  
@@ -179,10 +170,8 @@ function shpRectBlock(vector, numHorizontal, numVertical) {  
     });  
   }).flatten();  
 
-
-  // 将矩形块转换为 FeatureCollection  
+  // Convert the rectangular block to FeatureCollection
   var rectanglesFC = ee.FeatureCollection(rectangles).filterBounds(vector);  
-
 
   return rectanglesFC;  
 }
@@ -192,8 +181,6 @@ function pca (img) {
     var scale = 200;
     var region = roi;
     var year = img.get('year');
-
-
     var meanDict = img.reduceRegion({
         reducer: ee.Reducer.mean(),
         geometry: region,
@@ -203,7 +190,6 @@ function pca (img) {
     var means = ee.Image.constant(meanDict.values(bandNames));
     var centered = img.subtract(means);
 
-
     var getNewBandNames = function(prefix) {
         var seq = ee.List.sequence(1, 6);
         return seq.map(function(n) {
@@ -211,11 +197,10 @@ function pca (img) {
         });
     };
 
-
     var getPrincipalComponents = function(centered, scale, region) {
         var arrays = centered.toArray();
-        // 添加波段权重
-        var weights = ee.Array([1, 1, 1, 1, 2 ,2]); // 根据实际波段数量调整
+        // Add band weights
+        var weights = ee.Array([1, 1, 1, 1, 2 ,2]); 
         arrays = arrays.multiply(weights);
 
 
@@ -231,23 +216,15 @@ function pca (img) {
         var eigens = covarArray.eigen();
         var eigenValues = eigens.slice(1, 0, 1);
         var eigenVectors = eigens.slice(1, 1);
-
-
         var eigenValuesList = eigenValues.toList().flatten();
         var total = eigenValuesList.reduce(ee.Reducer.sum());
         var percentageVariance = eigenValuesList.map(function(item) {
             return (ee.Number(item).divide(total)).multiply(100).format('%.2f');
         });
-
-
         var arrayImage = arrays.toArray(1);
         var principalComponents = ee.Image(eigenVectors).matrixMultiply(arrayImage);
-
-
         var sdImage = ee.Image(eigenValues.sqrt())
             .arrayProject([0]).arrayFlatten([getNewBandNames('SD')]);
-
-
         return principalComponents
             .arrayProject([0])
             .arrayFlatten([getNewBandNames('PC', bandNames)])
@@ -256,11 +233,11 @@ function pca (img) {
             .set('eigenVectors', eigenVectors)
             .set('各个主成分的所占总信息量比例', percentageVariance);
     };
-
     img = getPrincipalComponents(centered,scale, region);
     return img;
 }
-var pcImage = pca(LL_clipped.select(bands1));  // 使用主成分分析函数处理影像
+// Process the image using the principal component analysis function
+var pcImage = pca(LL_clipped.select(bands1));  
 
 var pcImage1=pcImage.select('PC3', 'PC2', 'PC1')
 
@@ -276,7 +253,6 @@ Map.addLayer(
   false
 );
 
-
 var LL_clipped2=ee.Image.cat([l8SR,LL_clipped,terrain,pcImage,Sentinel_1]).float().clip(roi)
 
 var LL_clipped1= LL_clipped2.addBands(VV_contrast)
@@ -285,10 +261,7 @@ var LL_clipped1= LL_clipped2.addBands(VV_contrast)
                                 .addBands(VV_ent).addBands(VV_contrast)
                                 .addBands(VH_contrast).addBands(VH_asm).addBands(VH_idm)
                                 .addBands(VH_ent).addBands(B8asm)
-                                .addBands(B8idm).addBands(B8ent).addBands(B8contrast)
-                                .updateMask(keepMask);
-// print(LL_clipped1)
-
+                                .addBands(B8idm).addBands(B8ent).addBands(B8contrast);
 
 var bands = ['B1','B2', 'B3', 'B4', 'B5', 'B6', 
 'B7','B8','B10','B9','B11','elevation','slope','B1_1','B2_1','B3_1','B4_1','B5_1'
@@ -296,19 +269,22 @@ var bands = ['B1','B2', 'B3', 'B4', 'B5', 'B6',
 ,'VV_asm','VV_idm','VV_ent','VH_asm'
 ,'VH_idm','VH_ent'];
 
-
+//Define a 3×3 domain
 var kernel = ee.Kernel.square({
-  radius: 1,  // 半径1，相当于 3x3邻域
+  radius: 1,  // A radius of 1 is equivalent to a 3x3 neighborhood
   units: 'pixels',
   normalize: false
 });
 
-// 设定70%的阈值
-var threshold = 9 * 0.7;  // 6.3，按整数为7
+// Set a threshold of 70%
+var threshold = 9 * 0.7;  // 6.3, as an integer 7
 
-//**********************************************************************奥陶系变凝灰岩0 
+//**********************************************************************MtO 
+
+//In the standardized table2, select the MtO range and obtain it through the filter field YSEB
 var BN = table2.filter(ee.Filter.eq("YSEB", '变凝灰岩'));
 
+//Determine the threshold segmentation based on the three-dimensional space of PCA
 var BN1 = pc1.gt(-0.3).and(pc1.lte(1.5))
               .and(pc2.gt(1)).and(pc2.lt(2.5))
               .and(pc3.gt(0)).and(pc3.lt(2)).selfMask();
@@ -316,6 +292,7 @@ var BN1 = pc1.gt(-0.3).and(pc1.lte(1.5))
 var B11 = l8SR.select('B11');
 var B10 = l8SR.select('B10');
 
+//The top three features are extracted based on the SEaTH algorithm for threshold separation
 var BN2 = B11.gt(308.35).and(B11.lte(311.66))
               .and(B10.gt(308.53)).and(B10.lt(311.41))
               .and(pc2.gt(0.982)).and(pc3.lt(2.205)).selfMask();
@@ -327,13 +304,13 @@ var BN_neighborCount = BN_fa.reduceNeighborhood({
   kernel: kernel
 });
 
-// 生成空间一致性筛选掩膜
+// Generate spatial consistency screening masks
 var BN_consistencyMask = BN_neighborCount.gte(threshold);
 
-// 叠加一致性筛选结果
+// Superimpose the consistency screening results
 var BN_finalMask = BN_fa.updateMask(BN_consistencyMask);
 
-// 重新采样
+// Automatically generate the number of sample points
 var BN_samples = BN_finalMask.stratifiedSample({
   numPoints: 1500,
   classBand: null,
@@ -347,8 +324,10 @@ var Points0 = BN_samples.map(function(fea){
   return fea.set('landcover',0)
 })
 
+//**************Based on the same principle mentioned above, the subsequent automatic generation 
+of 13 lithological samples was carried out respectively*******************//
 
-//**********************************************************************第四系变玄武岩1 
+//**********************************************************************MbQ 
 var BX = table2.filter(ee.Filter.eq("YSEB", '变玄武岩'));
 
 var BX1 = pc1.gt(1.5).and(pc1.lte(3))
@@ -390,7 +369,7 @@ var Points1 = BX_samples.map(function(fea){
 
 print(Points1.size())
 
-//**********************************************************************泥盆系变质砾岩、砂岩混合2
+//**********************************************************************MsD
 var BZL = table2.filter(ee.Filter.eq("YSEB", '变质砾岩、砂岩混合'));
 
 var BZL1 = pc1.gt(1).and(pc1.lte(2.3))
@@ -430,7 +409,7 @@ var Points2 = BZL_samples.map(function(fea){
   return fea.set('landcover',2)
 })
 
-//**********************************************************************第四系变质长石砂岩3**********
+//**********************************************************************MfQ
 var BZC = table2.filter(ee.Filter.eq("YSEB", '变质长石砂岩'));
 
 var BZC1 = pc1.gt(1.5).and(pc1.lte(2.5))
@@ -469,7 +448,7 @@ var Points3 = BZC_samples.map(function(fea){
   return fea.set('landcover',3)
 })
 
-//**********************************************************************蓟县系大理岩 4 
+//**********************************************************************MJx
 var DL = table2.filter(ee.Filter.eq("YSEB", '大理岩'));
 
 var DL1 = pc1.gt(0).and(pc1.lte(1.5))
@@ -503,20 +482,16 @@ var DL_samples = DL_finalMask.stratifiedSample({
   geometries: true
 });
 
-
 var Points4 = DL_samples.map(function(fea){
   return fea.set('landcover',4)
 })
 
-
-//**********************************************************************第四系洪积层（含砾岩、砂岩）5
+//**********************************************************************AlQ
 var DS = table2.filter(ee.Filter.eq("YSEB", '第四系洪积层（含砾岩、砂岩）'));
 
 var DS1 = pc1.gt(-0.5).and(pc1.lte(1))
               .and(pc2.gt(-2)).and(pc2.lt(-0.5))
               .and(pc3.gt(-0.5)).and(pc3.lt(1)).selfMask();
-
-
 
 var DS2 = B8ent.gt(3.94).and(B8ent.lte(4.14))
               .and(B8asm.gt(0.016)).and(B8asm.lt(0.022))
@@ -536,7 +511,6 @@ var DS_consistencyMask = DS_neighborCount.gte(threshold);
 // 叠加一致性筛选结果
 var DS_finalMask = DS_fa.updateMask(DS_consistencyMask);
 
-
 var DS_samples = DS_finalMask.stratifiedSample({
   numPoints: 1500,
   classBand: null,
@@ -551,7 +525,7 @@ var Points5 = DS_samples.map(function(fea){
 })
 
 
-//**********************************************************************奥陶系花岗闪长岩6
+//**********************************************************************GrO
 var HGS = table2.filter(ee.Filter.eq("YSEB", '花岗闪长岩'));
 
 var HGS1 = pc1.gt(-1).and(pc1.lte(0.5))
@@ -577,7 +551,6 @@ var HGS_consistencyMask = HGS_neighborCount.gte(threshold);
 // 叠加一致性筛选结果
 var HGS_finalMask = HGS_fa.updateMask(HGS_consistencyMask);
 
-
 var HGS_samples = HGS_finalMask.stratifiedSample({
   numPoints: 1500,
   classBand: null,
@@ -592,7 +565,7 @@ var Points6 = HGS_samples.map(function(fea){
 })
 
 
-//**********************************************************************钾长花岗岩7
+//**********************************************************************KGr
 var JC = table2.filter(ee.Filter.eq("YSEB", '钾长花岗岩'));
 
 var JC1 = pc1.gt(-2).and(pc1.lte(-0.5))
@@ -633,7 +606,7 @@ var Points7 = JC_samples.map(function(fea){
   return fea.set('landcover',7)
 })
 
-//**********************************************************************志留系流纹英安斑岩8 
+//**********************************************************************RpS
 var LW = table2.filter(ee.Filter.eq("YSEB", '流纹英安斑岩'));
 
 var LW1 = pc1.gt(2).and(pc1.lte(3))
@@ -660,7 +633,6 @@ var LW_consistencyMask = LW_neighborCount.gte(threshold);
 // 叠加一致性筛选结果
 var LW_finalMask = LW_fa.updateMask(LW_consistencyMask);
 
-
 var LW_samples = LW_finalMask.stratifiedSample({
   numPoints: 1500,
   classBand: null,
@@ -670,12 +642,11 @@ var LW_samples = LW_finalMask.stratifiedSample({
   geometries: true
 });
 
-
 var Points8 = LW_samples.map(function(fea){
   return fea.set('landcover',8)
 })
 
-//**********************************************************************奥陶系千枚岩9
+//**********************************************************************PhO
 var QM = table2.filter(ee.Filter.eq("YSEB", '千枚岩'));
 
 var QM1 = pc1.gt(-1).and(pc1.lte(0.5))
@@ -718,7 +689,7 @@ var Points9 = QM_samples.map(function(fea){
 // Map.addLayer(QM_mask, {'palette':['blue']}, 'MG_mask');
 // Map.addLayer(QM_samples)
 
-//**********************************************************************志留系石英片岩10
+//**********************************************************************QsS
 var SY = table2.filter(ee.Filter.eq("YSEB", '石英片岩'));
 
 var SY1 = pc1.gt(-1).and(pc1.lte(1))
@@ -755,8 +726,7 @@ var Points10 = SY_samples.map(function(fea){
   return fea.set('landcover',10)
 })
 
-
-//**********************************************************************志留系斜长花岗岩11
+//**********************************************************************PgS
 var XC = table2.filter(ee.Filter.eq("YSEB", '斜长花岗岩'));
 
 var XC1 = pc1.gt(-0.2).and(pc1.lte(1))
@@ -789,13 +759,11 @@ var XC_samples = XC_finalMask.stratifiedSample({
   geometries: true
 });
 
-
 var Points11 = XC_samples.map(function(fea){
   return fea.set('landcover',11)
 })
 
-
-//**********************************************************************第四系粘土岩-砂岩12
+//**********************************************************************CSQ
 var NT = table2.filter(ee.Filter.eq("YSEB", '粘土岩-砂岩'));
 
 var NT1 = pc1.gt(-1.5).and(pc1.lte(-0.3))
@@ -830,12 +798,11 @@ var NT_samples = NT_finalMask.stratifiedSample({
   geometries: true
 });
 
-
 var Points12 = NT_samples.map(function(fea){
   return fea.set('landcover',12)
 })
 
-//**********************************************************************长石砂岩-砾岩-粉砂岩13
+//**********************************************************************FCS
 var CS = table2.filter(ee.Filter.eq("YSEB", '长石砂岩-砾岩-粉砂岩'));
 
 var CS1 = pc1.gt(0.5).and(pc1.lte(1.5))
@@ -875,5 +842,13 @@ var Points13 = CS_samples.map(function(fea){
 var sample = ee.FeatureCollection([Points0,Points1,Points2,Points3,Points4,Points5,Points6,Points7,Points8,Points9,Points10,Points11,Points12,Points13]).flatten();
 print(sample.size())
 
+// Select samples in LL_clipped1 through the feature set and assign the sample attribute to the samples
+var training = LL_clipped1.select(bands).sampleRegions({
+  collection: sample,
+  properties: ['landcover'],
+  scale: 30,
+  tileScale:16,
+  geometries: true
+});
 
-Export.table.toAsset(sample)
+Export.table.toAsset(training)

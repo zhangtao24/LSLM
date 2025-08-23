@@ -1,0 +1,86 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.feature_selection import f_classif
+import os
+
+df = pd.read_csv(r"C:\Users\10655\Desktop\W_Urban_shapefile.csv")
+feature_cols = df.select_dtypes(include=['float64', 'int64']).columns
+feature_cols = [col for col in feature_cols if col != 'landcover']
+
+X = df[feature_cols].values
+y = df['landcover'].values
+unique_classes = np.unique(y)
+
+all_stats = []
+
+plt.rcParams['font.family'] = 'Times New Roman'
+plt.rcParams['font.size'] = 38
+
+# === 2. Conduct one-to-many Fisher analysis for each category and plot ===
+for c in unique_classes:
+    y_binary = (y == c).astype(int)
+    f_values, _ = f_classif(X, y_binary)
+    scores = pd.Series(f_values, index=feature_cols).sort_values(ascending=False)
+
+    top_bands = scores.index[:3]  #Select the top 3 bands for each category
+
+    for top_band in top_bands:
+        positive = df[y == c][top_band]
+        negative = df[y != c][top_band]
+
+        full_min = min(positive.min(), negative.min())
+        full_max = max(positive.max(), negative.max())
+        bins = np.linspace(full_min, full_max, 31)
+
+        pos_counts, _ = np.histogram(positive, bins=bins)
+        neg_counts, _ = np.histogram(negative, bins=bins)
+
+        pos_mean = positive.mean()
+        pos_std = positive.std()
+        pos_min = positive.min()
+        pos_max = positive.max()
+        pos_median = positive.median()
+        threshold_min = pos_median - pos_std
+        threshold_max = pos_median + pos_std
+        f_score = scores[top_band]
+
+        for i in range(len(bins) - 1):
+            all_stats.append({
+                'class': c,
+                'top_band': top_band,
+                'bin_left': bins[i],
+                'bin_right': bins[i+1],
+                'class_count': pos_counts[i],
+                'others_count': neg_counts[i],
+                'f_score': f_score,
+                'mean': pos_mean,
+                'std': pos_std,
+                'min': pos_min,
+                'max': pos_max,
+                'median': pos_median,
+                'threshold_min': threshold_min,
+                'threshold_max': threshold_max
+            })
+
+        # === 3. Visualize and save the image===
+        plt.figure(figsize=(10, 6))
+        plt.hist(positive, bins=30, alpha=0.5, label=f'{c}', color='blue')
+        plt.hist(negative, bins=30, alpha=0.3, label='Others', color='gray')
+        plt.axvline(threshold_min, color='red', linestyle='--')
+        plt.axvline(threshold_max, color='green', linestyle='--')
+        plt.xlabel(f'{c} - {top_band}')
+        plt.ylabel('Frequency')
+        plt.legend(frameon=False)
+        plt.grid(True, linestyle='--', alpha=0.4)
+        plt.tight_layout()
+
+        # 输出路径（按类保存到子文件夹）
+        output_dir = f"C:/Users/10655/Desktop/test/class_{c}/"
+        os.makedirs(output_dir, exist_ok=True)
+        plt.savefig(os.path.join(output_dir, f"{top_band}.png"), dpi=400, bbox_inches='tight')
+        plt.close()
+
+
+output_path = r"C:\Users\10655\Desktop\test\training_3D_top3.csv"
+pd.DataFrame(all_stats).to_csv(output_path, index=False)

@@ -1,0 +1,879 @@
+var roi = table1;
+// print("roi",roi);
+Map.addLayer(roi,{'color':'blue'},'studyArea',false);
+Map.centerObject(roi);
+var area_km2= roi.geometry().area().divide(1e6);
+// var area_km2 = ee.Geometry(roi).area({'maxError': 1}).divide(1e6);
+print('ROI面积（km²）:', area_km2);
+
+
+var dataset = ee.ImageCollection('ESA/WorldCover/v100').first();
+var dataset1 = dataset.clip(roi);
+
+var water_ESA = dataset1.eq(80);
+var urban_ESA = dataset1.eq(50);
+var foret_ESA = dataset1.eq(10);
+var keepMask = water_ESA.or(urban_ESA).or(foret_ESA).not();
+
+//***********************************************************************************Sentinel-2
+// remove cloud from Sentinel-2
+function rmS2cloud(image) {
+  var qa = image.select('QA60');
+ 
+  // Bits 10 and 11 are clouds and cirrus, respectively.
+  var cloudBitMask = 1 << 10;
+  var cirrusBitMask = 1 << 11;
+
+  // Both flags should be set to zero, indicating clear conditions.
+  var mask = qa.bitwiseAnd(cloudBitMask).eq(0)
+      .and(qa.bitwiseAnd(cirrusBitMask).eq(0));
+  // var mask2 = image.select('B2').lte(2000);
+  return image.updateMask(mask).toDouble().divide(10000)
+              .copyProperties(image, ["system:time_start", "system:time_end"]);
+}
+
+var LL_clipped = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+                  .filterBounds(roi)
+                  .filterDate('2021-07-01','2021-10-30') 
+                  // Pre-filter to get less cloudy granules.
+                  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE',20))  //云量
+                  .select('B1','B2','B3','B4','B5','B6','B7','B8','B8A','B9','B11','B12','QA60')
+                  .map(rmS2cloud)
+                  .median()
+                  .clip(roi)
+                  
+
+Map.addLayer(LL_clipped, {bands: ['B4', 'B3', 'B2'], max: 0.5, gamma: 2}, 'S2 Image',false);
+
+// //***************************************************************B8 texture 
+var compositeINT = LL_clipped.multiply(2).subtract(0.12).multiply(255);
+var toBytes = compositeINT.toByte();
+//print(toBytes);
+
+// Get the NIR band.
+var nir = toBytes.select('B8');
+var glcm = nir.glcmTexture({size: 3});
+
+//print(glcm);
+//Select information from glcm as follows
+var B8contrast = glcm.select('B8_contrast');  
+var B8asm = glcm.select('B8_asm');   
+var B8idm = glcm.select('B8_idm');  
+var B8ent = glcm.select('B8_ent');    
+
+
+//********************************************************************************************S1
+var collectionS1=ee.ImageCollection('COPERNICUS/S1_GRD')
+.filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
+
+.filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VH'));
+
+var collectionS1_IW=collectionS1
+
+.filterBounds(roi)
+
+.filterMetadata('instrumentMode','equals','IW')
+
+.filterDate('2021-07-01','2021-10-30');
+var Sentinel_1=collectionS1_IW.median().clip(roi);
+
+//***************************************************************************************VV/VH纹理 
+var input = Sentinel_1.divide(11/51).add(2040/11).toUint16();
+var glcm = input.glcmTexture({size: 3});
+print('glcm', glcm);
+
+var VV_contrast = glcm.select('VV_contrast');  //对比度 
+var VV_asm = glcm.select('VV_asm');    //角二阶矩 
+var VV_idm = glcm.select('VV_idm');    //反差分矩阵
+var VV_ent = glcm.select('VV_ent');    //熵 
+
+
+var VH= input.reduceNeighborhood({
+  reducer: ee.Reducer.mean(),
+  kernel: ee.Kernel.square(3),
+});
+//从glcm中选择信息，如下
+var VH_contrast = glcm.select('VH_contrast');  //对比度 
+var VH_asm = glcm.select('VH_asm');    //角二阶矩 
+var VH_idm = glcm.select('VH_idm');    //反差分矩阵
+var VH_ent = glcm.select('VH_ent');    //熵 
+
+
+//***********************************************************************************landsat
+
+function rmCloud_TOA(image) {
+  var CloudScore = ee.Algorithms.Landsat.simpleCloudScore(image);
+  var image_rm =CloudScore.select("cloud").lte(30);
+  return image.updateMask(image_rm);
+}
+
+var l8SR = ee.ImageCollection('LANDSAT/LC08/C02/T1_TOA')
+                  .filterBounds(roi)
+                  .filterDate('2020-05-01','2020-10-30')
+                  .map(rmCloud_TOA)
+                  .select('B1','B2','B3','B4','B5','B6','B7','B8','B9','B10','B11')
+                  .median()   //中值合成
+                  .clip(roi)
+
+// print("l8SR",l8SR)
+
+var rgbVis = {
+  min: 0.0,
+  max: 0.3,
+  gamma: 1.4,
+  bands: ['B4', 'B3', 'B2'],
+};
+
+Map.addLayer(l8SR, rgbVis, 'l8SR',false);
+//***********************************************************************************DEM
+var dataset = ee.Image('USGS/SRTMGL1_003')
+                .clip(roi);
+var terrain = ee.Algorithms.Terrain(dataset);
+
+var bands1=["B2","B3","B4","B8","B11","B12"]
+//***********************************************************************************PCA
+// 定义一个函数，用于对矢量进行矩形分块
+function shpRectBlock(vector, numHorizontal, numVertical) {  
+  // 检查输入是否为矢量  
+  if (!(vector instanceof ee.Geometry || vector instanceof ee.Feature || vector instanceof ee.FeatureCollection)) {  
+    throw new Error('Input must be a Geometry, Feature, or FeatureCollection.');  
+  }  
+
+
+  // 如果是 FeatureCollection，提取其几何  
+  if (vector instanceof ee.FeatureCollection) {  
+    vector = vector.geometry();  
+  } 
+  else if (vector instanceof ee.Feature) {  
+    vector = vector.geometry();  
+  }
+  else {
+    vector = vector;
+  }
+
+  // 获取矢量的边界框  
+  var bounds = vector.bounds();  
+  var coords = ee.List(bounds.coordinates().get(0)); // 获取边界框的坐标  
+  var xmin = ee.Number(ee.List(coords.get(0)).get(0));  
+  var ymin = ee.Number(ee.List(coords.get(0)).get(1));  
+  var xmax = ee.Number(ee.List(coords.get(2)).get(0));  
+  var ymax = ee.Number(ee.List(coords.get(2)).get(1));  
+
+
+  // 计算每个矩形块的宽度和高度  
+  var xStep = xmax.subtract(xmin).divide(numHorizontal);  
+  var yStep = ymax.subtract(ymin).divide(numVertical);  
+
+
+  // 创建矩形块  
+  var rectangles = ee.List.sequence(0, numHorizontal - 1).map(function (i) {  
+    return ee.List.sequence(0, numVertical - 1).map(function (j) {  
+      var x0 = xmin.add(xStep.multiply(i));  
+      var x1 = x0.add(xStep);  
+      var y0 = ymin.add(yStep.multiply(j));  
+      var y1 = y0.add(yStep);
+      var tmpGeo = ee.Geometry.Rectangle([x0, y0, x1, y1]);
+      var GeoCommon = tmpGeo.intersection(vector,1);
+      // return ee.Feature(ee.Geometry.Rectangle([x0, y0, x1, y1]));
+      return ee.Feature(GeoCommon);
+    });  
+  }).flatten();  
+
+
+  // 将矩形块转换为 FeatureCollection  
+  var rectanglesFC = ee.FeatureCollection(rectangles).filterBounds(vector);  
+
+
+  return rectanglesFC;  
+}
+
+function pca (img) {
+    var bandNames = bands1;
+    var scale = 200;
+    var region = roi;
+    var year = img.get('year');
+
+
+    var meanDict = img.reduceRegion({
+        reducer: ee.Reducer.mean(),
+        geometry: region,
+        scale: scale,
+        maxPixels: 10e13
+    });
+    var means = ee.Image.constant(meanDict.values(bandNames));
+    var centered = img.subtract(means);
+
+
+    var getNewBandNames = function(prefix) {
+        var seq = ee.List.sequence(1, 6);
+        return seq.map(function(n) {
+            return ee.String(prefix).cat(ee.Number(n).int());
+        });
+    };
+
+
+    var getPrincipalComponents = function(centered, scale, region) {
+        var arrays = centered.toArray();
+        // 添加波段权重
+        var weights = ee.Array([1, 1, 1, 1, 2 ,2]); // 根据实际波段数量调整
+        arrays = arrays.multiply(weights);
+
+
+        var covar = arrays.reduceRegion({
+            reducer: ee.Reducer.centeredCovariance(),
+            geometry: region,
+            scale: scale,
+            bestEffort: true,
+            maxPixels: 10e13
+        });
+        var covarArray = ee.Array(covar.get('array'));
+
+        var eigens = covarArray.eigen();
+        var eigenValues = eigens.slice(1, 0, 1);
+        var eigenVectors = eigens.slice(1, 1);
+
+
+        var eigenValuesList = eigenValues.toList().flatten();
+        var total = eigenValuesList.reduce(ee.Reducer.sum());
+        var percentageVariance = eigenValuesList.map(function(item) {
+            return (ee.Number(item).divide(total)).multiply(100).format('%.2f');
+        });
+
+
+        var arrayImage = arrays.toArray(1);
+        var principalComponents = ee.Image(eigenVectors).matrixMultiply(arrayImage);
+
+
+        var sdImage = ee.Image(eigenValues.sqrt())
+            .arrayProject([0]).arrayFlatten([getNewBandNames('SD')]);
+
+
+        return principalComponents
+            .arrayProject([0])
+            .arrayFlatten([getNewBandNames('PC', bandNames)])
+            .divide(sdImage)
+            .set('eigensValue', eigenValuesList)
+            .set('eigenVectors', eigenVectors)
+            .set('各个主成分的所占总信息量比例', percentageVariance);
+    };
+
+    img = getPrincipalComponents(centered,scale, region);
+    return img;
+}
+var pcImage = pca(LL_clipped.select(bands1));  // 使用主成分分析函数处理影像
+
+var pcImage1=pcImage.select('PC3', 'PC2', 'PC1')
+
+var pc1 = pcImage1.select('PC1');
+var pc2 = pcImage1.select('PC2');
+var pc3 = pcImage1.select('PC3');
+var B11 = l8SR.select('B11');
+
+Map.addLayer(
+  pcImage, 
+  {bands: ['PC3', 'PC2', 'PC1'], min: -2, max: 2}, 
+  'Landsat 8 - PCA', 
+  false
+);
+
+
+var LL_clipped2=ee.Image.cat([l8SR,LL_clipped,terrain,pcImage,Sentinel_1]).float().clip(roi)
+
+var LL_clipped1= LL_clipped2.addBands(VV_contrast)
+                                .addBands(VV_asm)
+                                .addBands(VV_idm)
+                                .addBands(VV_ent).addBands(VV_contrast)
+                                .addBands(VH_contrast).addBands(VH_asm).addBands(VH_idm)
+                                .addBands(VH_ent).addBands(B8asm)
+                                .addBands(B8idm).addBands(B8ent).addBands(B8contrast)
+                                .updateMask(keepMask);
+// print(LL_clipped1)
+
+
+var bands = ['B1','B2', 'B3', 'B4', 'B5', 'B6', 
+'B7','B8','B10','B9','B11','elevation','slope','B1_1','B2_1','B3_1','B4_1','B5_1'
+,'B6_1','B7_1','B8_1','B8A','B9_1','B11_1','B12','PC1','PC2','PC3','VV','VH'
+,'VV_asm','VV_idm','VV_ent','VH_asm'
+,'VH_idm','VH_ent'];
+
+
+var kernel = ee.Kernel.square({
+  radius: 1,  // 半径1，相当于 3x3邻域
+  units: 'pixels',
+  normalize: false
+});
+
+// 设定70%的阈值
+var threshold = 9 * 0.7;  // 6.3，按整数为7
+
+//**********************************************************************奥陶系变凝灰岩0 
+var BN = table2.filter(ee.Filter.eq("YSEB", '变凝灰岩'));
+
+var BN1 = pc1.gt(-0.3).and(pc1.lte(1.5))
+              .and(pc2.gt(1)).and(pc2.lt(2.5))
+              .and(pc3.gt(0)).and(pc3.lt(2)).selfMask();
+              
+var B11 = l8SR.select('B11');
+var B10 = l8SR.select('B10');
+
+var BN2 = B11.gt(308.35).and(B11.lte(311.66))
+              .and(B10.gt(308.53)).and(B10.lt(311.41))
+              .and(pc2.gt(0.982)).and(pc3.lt(2.205)).selfMask();
+
+var BN_fa = BN1.and(BN2).clip(BN);
+
+var BN_neighborCount = BN_fa.reduceNeighborhood({
+  reducer: ee.Reducer.sum(),
+  kernel: kernel
+});
+
+// 生成空间一致性筛选掩膜
+var BN_consistencyMask = BN_neighborCount.gte(threshold);
+
+// 叠加一致性筛选结果
+var BN_finalMask = BN_fa.updateMask(BN_consistencyMask);
+
+// 重新采样
+var BN_samples = BN_finalMask.stratifiedSample({
+  numPoints: 1500,
+  classBand: null,
+  region: BN.geometry(),
+  scale: 10,
+  seed: 42,
+  geometries: true
+});
+
+var Points0 = BN_samples.map(function(fea){
+  return fea.set('landcover',0)
+})
+
+
+//**********************************************************************第四系变玄武岩1 
+var BX = table2.filter(ee.Filter.eq("YSEB", '变玄武岩'));
+
+var BX1 = pc1.gt(1.5).and(pc1.lte(3))
+              .and(pc2.gt(-0.8)).and(pc2.lt(1))
+              .and(pc3.gt(-0.5)).and(pc3.lt(0.5)).selfMask();
+
+var B9_1 = LL_clipped.select('B9');
+var B8A = LL_clipped.select('B8A');
+var B5 = l8SR.select('B5');
+var BX2 = B9_1.gt(0.0804).and(B9_1.lte(0.134))
+              .and(B8A.gt(0.0755)).and(B8A.lt(0.137))
+              .and(B5.gt(0.0896)).and(B5.lt(0.143)).selfMask();
+
+var BX_fa = BX1.and(BX2).clip(BX);
+
+var BX_neighborCount = BX_fa.reduceNeighborhood({
+  reducer: ee.Reducer.sum(),
+  kernel: kernel
+});
+
+// 生成空间一致性筛选掩膜
+var BX_consistencyMask = BX_neighborCount.gte(threshold);
+
+// 叠加一致性筛选结果
+var BX_finalMask = BX_fa.updateMask(BX_consistencyMask);
+
+var BX_samples = BX_finalMask.stratifiedSample({
+  numPoints: 1500,
+  classBand: null,
+  region: BX.geometry(),
+  scale: 10,
+  seed: 42,
+  geometries: true
+});
+
+var Points1 = BX_samples.map(function(fea){
+  return fea.set('landcover',1)
+})
+
+print(Points1.size())
+
+//**********************************************************************泥盆系变质砾岩、砂岩混合2
+var BZL = table2.filter(ee.Filter.eq("YSEB", '变质砾岩、砂岩混合'));
+
+var BZL1 = pc1.gt(1).and(pc1.lte(2.3))
+              .and(pc2.gt(1)).and(pc2.lt(2.5))
+              .and(pc3.gt(-2.5)).and(pc3.lt(-0.5)).selfMask();
+
+var B1_1 = LL_clipped.select('B1');
+var B2_1 = LL_clipped.select('B2');
+var B1 = l8SR.select('B1');
+var BZL2 = B1_1.gt(0.0476).and(B1_1.lte(0.0672))
+              .and(B2_1.gt(0.0533)).and(B2_1.lt(0.0851))
+              .and(B1.gt(0.129)).and(B1.lt(0.144)).selfMask();
+
+var BZL_fa = BZL1.and(BZL2).clip(BZL);
+
+var BZL_neighborCount = BZL_fa.reduceNeighborhood({
+  reducer: ee.Reducer.sum(),
+  kernel: kernel
+});
+
+// 生成空间一致性筛选掩膜
+var BZL_consistencyMask = BZL_neighborCount.gte(threshold);
+
+// 叠加一致性筛选结果
+var BZL_finalMask = BZL_fa.updateMask(BZL_consistencyMask);
+
+var BZL_samples = BZL_finalMask.stratifiedSample({
+  numPoints: 1500,
+  classBand: null,
+  region: BZL.geometry(),
+  scale: 10,
+  seed: 42,
+  geometries: true
+});
+
+var Points2 = BZL_samples.map(function(fea){
+  return fea.set('landcover',2)
+})
+
+//**********************************************************************第四系变质长石砂岩3**********
+var BZC = table2.filter(ee.Filter.eq("YSEB", '变质长石砂岩'));
+
+var BZC1 = pc1.gt(1.5).and(pc1.lte(2.5))
+              .and(pc2.gt(-2)).and(pc2.lt(-0.5))
+              .and(pc3.gt(-1.5)).and(pc3.lt(-0.7)).selfMask();
+
+var Elevation = terrain.select('elevation');
+var B12 = LL_clipped.select('B12');
+var BZC2 = Elevation.gt(2243.64).and(Elevation.lte(2434.35))
+              .and(B12.gt(0.115)).and(B12.lt(0.164))
+              .and(VV_contrast.gt(63.337)).and(VV_contrast.lt(200.597)).selfMask();
+              
+var BZC_fa = BZC1.and(BZC2).clip(BZC);
+
+var BZC_neighborCount = BZC_fa.reduceNeighborhood({
+  reducer: ee.Reducer.sum(),
+  kernel: kernel
+});
+
+// 生成空间一致性筛选掩膜
+var BZC_consistencyMask = BZC_neighborCount.gte(threshold);
+
+// 叠加一致性筛选结果
+var BZC_finalMask = BZC_fa.updateMask(BZC_consistencyMask);
+
+var BZC_samples = BZC_finalMask.stratifiedSample({
+  numPoints: 1500,
+  classBand: null,
+  region: BZC.geometry(),
+  scale: 10,
+  seed: 42,
+  geometries: true
+});
+
+var Points3 = BZC_samples.map(function(fea){
+  return fea.set('landcover',3)
+})
+
+//**********************************************************************蓟县系大理岩 4 
+var DL = table2.filter(ee.Filter.eq("YSEB", '大理岩'));
+
+var DL1 = pc1.gt(0).and(pc1.lte(1.5))
+              .and(pc2.gt(-2.5)).and(pc2.lt(-1))
+              .and(pc3.gt(-3)).and(pc3.lt(-1.5)).selfMask();
+              
+var slope = terrain.select('slope');
+var DL2 = pc3.gt(-2.993).and(pc3.lte(-1.515))
+              .and(pc2.gt(-2.229)).and(pc2.lt(-1.047))
+              .and(slope.gt(9.80)).and(slope.lt(23.19)).selfMask();
+
+var DL_fa = DL1.and(DL2).clip(DL.geometry());
+
+var DL_neighborCount = DL_fa.reduceNeighborhood({
+  reducer: ee.Reducer.sum(),
+  kernel: kernel
+});
+
+// 生成空间一致性筛选掩膜
+var DL_consistencyMask = DL_neighborCount.gte(threshold);
+
+// 叠加一致性筛选结果
+var DL_finalMask = DL_fa.updateMask(DL_consistencyMask);
+
+var DL_samples = DL_finalMask.stratifiedSample({
+  numPoints: 1500,
+  classBand: null,
+  region: DL.geometry(),
+  scale: 10,
+  seed: 42,
+  geometries: true
+});
+
+
+var Points4 = DL_samples.map(function(fea){
+  return fea.set('landcover',4)
+})
+
+
+//**********************************************************************第四系洪积层（含砾岩、砂岩）5
+var DS = table2.filter(ee.Filter.eq("YSEB", '第四系洪积层（含砾岩、砂岩）'));
+
+var DS1 = pc1.gt(-0.5).and(pc1.lte(1))
+              .and(pc2.gt(-2)).and(pc2.lt(-0.5))
+              .and(pc3.gt(-0.5)).and(pc3.lt(1)).selfMask();
+
+
+
+var DS2 = B8ent.gt(3.94).and(B8ent.lte(4.14))
+              .and(B8asm.gt(0.016)).and(B8asm.lt(0.022))
+              .and(B8idm.gt(0.17)).and(B8idm.lt(0.24)).selfMask();
+
+
+var DS_fa = DS1.and(DS2).clip(DS.geometry());
+
+var DS_neighborCount = DS_fa.reduceNeighborhood({
+  reducer: ee.Reducer.sum(),
+  kernel: kernel
+});
+
+// 生成空间一致性筛选掩膜
+var DS_consistencyMask = DS_neighborCount.gte(threshold);
+
+// 叠加一致性筛选结果
+var DS_finalMask = DS_fa.updateMask(DS_consistencyMask);
+
+
+var DS_samples = DS_finalMask.stratifiedSample({
+  numPoints: 1500,
+  classBand: null,
+  region: DS.geometry(),
+  scale: 10,
+  seed: 42,
+  geometries: true
+});
+
+var Points5 = DS_samples.map(function(fea){
+  return fea.set('landcover',5)
+})
+
+
+//**********************************************************************奥陶系花岗闪长岩6
+var HGS = table2.filter(ee.Filter.eq("YSEB", '花岗闪长岩'));
+
+var HGS1 = pc1.gt(-1).and(pc1.lte(0.5))
+              .and(pc2.gt(-1)).and(pc2.lt(0.5))
+              .and(pc3.gt(1.5)).and(pc3.lt(3)).selfMask();
+
+var B1_1 = LL_clipped.select('B1');
+var B11 = l8SR.select('B11');
+var HGS2 = pc3.gt(1.483).and(pc3.lte(3.038))
+              .and(B1_1.gt(0.119)).and(B1_1.lt(0.15))
+              .and(B11.gt(309.288)).and(B11.lt(312.582)).selfMask();
+              
+var HGS_fa = HGS1.and(HGS2).clip(HGS.geometry());
+
+var HGS_neighborCount = HGS_fa.reduceNeighborhood({
+  reducer: ee.Reducer.sum(),
+  kernel: kernel
+});
+
+// 生成空间一致性筛选掩膜
+var HGS_consistencyMask = HGS_neighborCount.gte(threshold);
+
+// 叠加一致性筛选结果
+var HGS_finalMask = HGS_fa.updateMask(HGS_consistencyMask);
+
+
+var HGS_samples = HGS_finalMask.stratifiedSample({
+  numPoints: 1500,
+  classBand: null,
+  region: HGS.geometry(),
+  scale: 10,
+  seed: 42,
+  geometries: true
+});
+
+var Points6 = HGS_samples.map(function(fea){
+  return fea.set('landcover',6)
+})
+
+
+//**********************************************************************钾长花岗岩7
+var JC = table2.filter(ee.Filter.eq("YSEB", '钾长花岗岩'));
+
+var JC1 = pc1.gt(-2).and(pc1.lte(-0.5))
+              .and(pc2.gt(0.5)).and(pc2.lt(2))
+              .and(pc3.gt(-2.5)).and(pc3.lt(-0.5)).selfMask();
+              
+var B9_1 = LL_clipped.select('B9');
+var B8A = LL_clipped.select('B8A');
+var B8_1 = LL_clipped.select('B8');
+var JC2 = B9_1.gt(0.252).and(B9_1.lte(0.336))
+              .and(B8A.gt(0.250)).and(B8A.lt(0.342))
+              .and(B8_1.gt(0.246)).and(B8_1.lt(0.338)).selfMask();
+
+var JC_fa = JC1.and(JC2).clip(JC.geometry());
+
+var JC_neighborCount = JC_fa.reduceNeighborhood({
+  reducer: ee.Reducer.sum(),
+  kernel: kernel
+});
+
+// 生成空间一致性筛选掩膜
+var JC_consistencyMask = JC_neighborCount.gte(threshold);
+
+// 叠加一致性筛选结果
+var JC_finalMask = JC_fa.updateMask(JC_consistencyMask);
+
+
+var JC_samples = JC_finalMask.stratifiedSample({
+  numPoints: 1500,
+  classBand: null,
+  region: JC.geometry(),
+  scale: 10,
+  seed: 42,
+  geometries: true
+});
+
+var Points7 = JC_samples.map(function(fea){
+  return fea.set('landcover',7)
+})
+
+//**********************************************************************志留系流纹英安斑岩8 
+var LW = table2.filter(ee.Filter.eq("YSEB", '流纹英安斑岩'));
+
+var LW1 = pc1.gt(2).and(pc1.lte(3))
+              .and(pc2.gt(-1.2)).and(pc2.lt(0))
+              .and(pc3.gt(-2.2)).and(pc3.lt(-0.7)).selfMask();
+              
+var B1 = l8SR.select('B1');
+var B2 = l8SR.select('B2');
+var B3 = l8SR.select('B3');
+var LW2 = B1.gt(0.123).and(B1.lte(0.138))
+              .and(B2.gt(0.106)).and(B2.lt(0.125))
+              .and(B3.gt(0.089)).and(B3.lt(0.115)).selfMask();
+
+var LW_fa = LW1.and(LW2).clip(LW.geometry());
+
+var LW_neighborCount = LW_fa.reduceNeighborhood({
+  reducer: ee.Reducer.sum(),
+  kernel: kernel
+});
+
+// 生成空间一致性筛选掩膜
+var LW_consistencyMask = LW_neighborCount.gte(threshold);
+
+// 叠加一致性筛选结果
+var LW_finalMask = LW_fa.updateMask(LW_consistencyMask);
+
+
+var LW_samples = LW_finalMask.stratifiedSample({
+  numPoints: 1500,
+  classBand: null,
+  region: LW.geometry(),
+  scale: 10,
+  seed: 42,
+  geometries: true
+});
+
+
+var Points8 = LW_samples.map(function(fea){
+  return fea.set('landcover',8)
+})
+
+//**********************************************************************奥陶系千枚岩9
+var QM = table2.filter(ee.Filter.eq("YSEB", '千枚岩'));
+
+var QM1 = pc1.gt(-1).and(pc1.lte(0.5))
+              .and(pc2.gt(0)).and(pc2.lt(1))
+              .and(pc3.gt(0.5)).and(pc3.lt(2.3)).selfMask();
+              
+var B7 = l8SR.select('B7');
+var QM2 = pc3.gt(0.360).and(pc3.lte(2.174))
+              .and(B7.gt(0.269)).and(B7.lt(0.346))
+              .and(B2.gt(0.158)).and(B2.lt(0.189)).selfMask();
+
+var QM_fa = QM1.and(QM2).clip(QM.geometry());
+
+var QM_neighborCount = QM_fa.reduceNeighborhood({
+  reducer: ee.Reducer.sum(),
+  kernel: kernel
+});
+
+// 生成空间一致性筛选掩膜
+var QM_consistencyMask = QM_neighborCount.gte(threshold);
+
+// 叠加一致性筛选结果
+var QM_finalMask = QM_fa.updateMask(QM_consistencyMask);
+
+var QM_samples = QM_finalMask.stratifiedSample({
+  numPoints: 1500,
+  classBand: null,
+  region: QM.geometry(),
+  scale: 10,
+  seed: 42,
+  geometries: true
+});
+
+var Points9 = QM_samples.map(function(fea){
+  return fea.set('landcover',9)
+})
+
+// Map.addLayer(QM, {'palette':['#7a34d6']}, 'MG')
+// Map.addLayer(QM1, {'palette':['green']}, 'MG1');
+// Map.addLayer(QM_mask, {'palette':['blue']}, 'MG_mask');
+// Map.addLayer(QM_samples)
+
+//**********************************************************************志留系石英片岩10
+var SY = table2.filter(ee.Filter.eq("YSEB", '石英片岩'));
+
+var SY1 = pc1.gt(-1).and(pc1.lte(1))
+              .and(pc2.gt(0.5)).and(pc2.lt(2.5))
+              .and(pc3.gt(1)).and(pc3.lt(2.5)).selfMask();
+              
+var SY2 = pc3.gt(1.2).and(pc3.lte(2.678))
+              .and(pc2.gt(0.5)).and(pc2.lt(2.308))
+              .and(B7.gt(0.269)).and(B7.lt(0.352)).selfMask();
+
+var SY_fa = SY1.and(SY2).clip(SY.geometry());
+
+var SY_neighborCount = SY_fa.reduceNeighborhood({
+  reducer: ee.Reducer.sum(),
+  kernel: kernel
+});
+
+// 生成空间一致性筛选掩膜
+var SY_consistencyMask = SY_neighborCount.gte(threshold);
+
+// 叠加一致性筛选结果
+var SY_finalMask = SY_fa.updateMask(SY_consistencyMask);
+
+var SY_samples = SY_finalMask.stratifiedSample({
+  numPoints: 1500,
+  classBand: null,
+  region: SY.geometry(),
+  scale: 10,
+  seed: 42,
+  geometries: true
+});
+
+var Points10 = SY_samples.map(function(fea){
+  return fea.set('landcover',10)
+})
+
+
+//**********************************************************************志留系斜长花岗岩11
+var XC = table2.filter(ee.Filter.eq("YSEB", '斜长花岗岩'));
+
+var XC1 = pc1.gt(-0.2).and(pc1.lte(1))
+              .and(pc2.gt(1.5)).and(pc2.lt(2.5))
+              .and(pc3.gt(0)).and(pc3.lt(2)).selfMask();
+
+var XC2 = pc2.gt(1.41).and(pc2.lte(2.485))
+              .and(Elevation.gt(1733.66)).and(Elevation.lt(1804.33))
+              .and(B7.gt(0.257)).and(B7.lt(0.327)).selfMask();
+              
+var XC_fa = XC1.and(XC2).clip(XC.geometry());
+
+var XC_neighborCount = XC_fa.reduceNeighborhood({
+  reducer: ee.Reducer.sum(),
+  kernel: kernel
+});
+
+// 生成空间一致性筛选掩膜
+var XC_consistencyMask = XC_neighborCount.gte(threshold);
+
+// 叠加一致性筛选结果
+var XC_finalMask = XC_fa.updateMask(XC_consistencyMask);
+
+var XC_samples = XC_finalMask.stratifiedSample({
+  numPoints: 1500,
+  classBand: null,
+  region: XC.geometry(),
+  scale: 10,
+  seed: 42,
+  geometries: true
+});
+
+
+var Points11 = XC_samples.map(function(fea){
+  return fea.set('landcover',11)
+})
+
+
+//**********************************************************************第四系粘土岩-砂岩12
+var NT = table2.filter(ee.Filter.eq("YSEB", '粘土岩-砂岩'));
+
+var NT1 = pc1.gt(-1.5).and(pc1.lte(-0.3))
+              .and(pc2.gt(0)).and(pc2.lt(1))
+              .and(pc3.gt(-1)).and(pc3.lt(0.5)).selfMask();
+
+var VV = Sentinel_1.select('VV');
+var VH = Sentinel_1.select('VH');
+var NT2 = VV.gt(-17.92).and(VV.lte(-14.43))
+              .and(VH.gt(-27.91)).and(VH.lt(-24.57))
+              .and(B5.gt(0.256)).and(B5.lt(0.3175)).selfMask();
+
+var NT_fa = NT1.and(NT2).clip(NT.geometry());
+
+var NT_neighborCount = NT_fa.reduceNeighborhood({
+  reducer: ee.Reducer.sum(),
+  kernel: kernel
+});
+
+// 生成空间一致性筛选掩膜
+var NT_consistencyMask = NT_neighborCount.gte(threshold);
+
+// 叠加一致性筛选结果
+var NT_finalMask = NT_fa.updateMask(NT_consistencyMask);
+
+var NT_samples = NT_finalMask.stratifiedSample({
+  numPoints: 1500,
+  classBand: null,
+  region: NT.geometry(),
+  scale: 10,
+  seed: 42,
+  geometries: true
+});
+
+
+var Points12 = NT_samples.map(function(fea){
+  return fea.set('landcover',12)
+})
+
+//**********************************************************************长石砂岩-砾岩-粉砂岩13
+var CS = table2.filter(ee.Filter.eq("YSEB", '长石砂岩-砾岩-粉砂岩'));
+
+var CS1 = pc1.gt(0.5).and(pc1.lte(1.5))
+              .and(pc2.gt(-1)).and(pc2.lt(0))
+              .and(pc3.gt(-1)).and(pc3.lt(0)).selfMask();
+
+var CS2 = pc2.gt(-0.976).and(pc2.lte(-0.164))
+              .and(B7.gt(0.169)).and(B7.lt(0.212))
+              .and(B12.gt(0.194)).and(B12.lt(0.246)).selfMask();
+
+var CS_fa = CS1.and(CS2).clip(CS.geometry());
+
+var CS_neighborCount = CS_fa.reduceNeighborhood({
+  reducer: ee.Reducer.sum(),
+  kernel: kernel
+});
+
+// 生成空间一致性筛选掩膜
+var CS_consistencyMask = CS_neighborCount.gte(threshold);
+
+// 叠加一致性筛选结果
+var CS_finalMask = CS_fa.updateMask(CS_consistencyMask);
+
+var CS_samples = CS_finalMask.stratifiedSample({
+  numPoints: 1500,
+  classBand: null,
+  region: CS.geometry(),
+  scale: 10,
+  seed: 42,
+  geometries: true
+});
+
+var Points13 = CS_samples.map(function(fea){
+  return fea.set('landcover',13)
+})
+
+var sample = ee.FeatureCollection([Points0,Points1,Points2,Points3,Points4,Points5,Points6,Points7,Points8,Points9,Points10,Points11,Points12,Points13]).flatten();
+print(sample.size())
+
+
+Export.table.toAsset(sample)

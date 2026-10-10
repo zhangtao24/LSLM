@@ -41,7 +41,7 @@ Map.addLayer(LL_clipped, {bands: ['B4', 'B3', 'B2'], max: 0.5, gamma: 2}, 'S2 Im
 
 // //***************************************************************B8 texture 
 var compositeINT = LL_clipped.multiply(2).subtract(0.12).multiply(255);
-var toBytes = compositeINT.toByte();
+var toBytes = compositeINT.toUint16();
 //print(toBytes);
 
 // Get the NIR band.

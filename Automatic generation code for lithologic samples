@@ -46,7 +46,7 @@ var toBytes = compositeINT.toByte();
 
 // Get the NIR band.
 var nir = toBytes.select('B8');
-var glcm = nir.glcmTexture({size: 3});
+var glcm = nir.glcmTexture({size: 1});
 
 //print(glcm);
 //Select information from glcm as follows
@@ -73,7 +73,7 @@ var Sentinel_1=collectionS1_IW.median().clip(roi);
 
 //***************************************************************************************VV/VH纹理 
 var input = Sentinel_1.divide(11/51).add(2040/11).toUint16();
-var glcm = input.glcmTexture({size: 3});
+var glcm = input.glcmTexture({size: 1});
 print('glcm', glcm);
 
 var VV_contrast = glcm.select('VV_contrast');  //对比度 
